@@ -1,0 +1,370 @@
+-- Enable UUID extension
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- 1. Enums
+CREATE TYPE user_role AS ENUM ('admin', 'wali_kelas', 'guru', 'tenaga_kependidikan');
+CREATE TYPE tipe_jadwal AS ENUM ('rutin', 'sewaktu');
+CREATE TYPE status_absensi AS ENUM ('hadir', 'izin', 'sakit', 'alpa');
+
+-- 2. Users & Roles
+CREATE TABLE public.users (
+    id UUID REFERENCES auth.users(id) PRIMARY KEY,
+    email TEXT UNIQUE NOT NULL,
+    full_name TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL
+);
+
+CREATE TABLE public.user_roles (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    role user_role NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL,
+    UNIQUE(user_id, role)
+);
+
+-- 3. Master Data
+-- Jurusan
+CREATE TABLE public.jurusan (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    nama TEXT NOT NULL,
+    keterangan TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL
+);
+
+-- Tingkat Kelas
+CREATE TABLE public.tingkat_kelas (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    nama TEXT NOT NULL, -- e.g., X, XI, XII
+    urutan INTEGER NOT NULL DEFAULT 1, -- e.g., 1, 2, 3
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL
+);
+
+-- Tahun Ajaran
+CREATE TABLE public.tahun_ajaran (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    nama TEXT NOT NULL, -- e.g., 2023/2024
+    semester TEXT NOT NULL, -- e.g., Semester 1, Semester 2
+    tanggal_mulai DATE NOT NULL,
+    tanggal_akhir DATE NOT NULL,
+    is_active BOOLEAN DEFAULT false,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL
+);
+
+-- Mata Pelajaran
+CREATE TABLE public.mata_pelajaran (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    nama TEXT NOT NULL,
+    kode TEXT UNIQUE NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL
+);
+
+-- Ruang Kelas (Ruangan fisik/penamaan kelas)
+CREATE TABLE public.ruang_kelas (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    nama TEXT NOT NULL,
+    tingkat_kelas_id UUID REFERENCES public.tingkat_kelas(id),
+    jurusan_id UUID REFERENCES public.jurusan(id),
+    wali_kelas_id UUID REFERENCES public.users(id),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL
+);
+
+-- Data Siswa
+CREATE TABLE public.siswa (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    nis TEXT UNIQUE NOT NULL,
+    nisn TEXT UNIQUE,
+    nama_lengkap TEXT NOT NULL,
+    jenis_kelamin TEXT CHECK (jenis_kelamin IN ('L', 'P')),
+    tanggal_lahir DATE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL
+);
+
+-- 4. Rombongan Belajar
+CREATE TABLE public.rombongan_belajar (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    nama TEXT NOT NULL,
+    jurusan_id UUID REFERENCES public.jurusan(id),
+    tahun_masuk_id UUID REFERENCES public.tahun_ajaran(id),
+    ruang_kelas_id UUID REFERENCES public.ruang_kelas(id),
+    wali_kelas_id UUID REFERENCES public.users(id),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL
+);
+
+-- Anggota Rombongan Belajar (Relasi Siswa - Rombel)
+CREATE TABLE public.anggota_rombel (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    rombongan_belajar_id UUID REFERENCES public.rombongan_belajar(id) ON DELETE CASCADE,
+    siswa_id UUID REFERENCES public.siswa(id) ON DELETE CASCADE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL,
+    UNIQUE(rombongan_belajar_id, siswa_id)
+);
+
+-- 5. Jadwal Pelajaran
+CREATE TABLE public.jadwal_pelajaran (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    tahun_ajaran_id UUID REFERENCES public.tahun_ajaran(id),
+    rombongan_belajar_id UUID REFERENCES public.rombongan_belajar(id) ON DELETE CASCADE,
+    mata_pelajaran_id UUID REFERENCES public.mata_pelajaran(id),
+    guru_id UUID REFERENCES public.users(id),
+    ruang_kelas_id UUID REFERENCES public.ruang_kelas(id),
+    tipe tipe_jadwal NOT NULL DEFAULT 'rutin',
+    hari INTEGER, -- 0 (Minggu) to 6 (Sabtu), null if sewaktu
+    tanggal DATE, -- null if sewaktu
+    jam_mulai TIME NOT NULL,
+    jam_selesai TIME NOT NULL,
+    tanggal_mulai_efektif DATE, -- for rutin
+    tanggal_akhir_efektif DATE, -- for rutin
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL
+);
+
+-- 6. Absensi
+CREATE TABLE public.absensi (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    jadwal_pelajaran_id UUID REFERENCES public.jadwal_pelajaran(id) ON DELETE CASCADE,
+    siswa_id UUID REFERENCES public.siswa(id) ON DELETE CASCADE,
+    tanggal DATE NOT NULL,
+    status status_absensi NOT NULL,
+    keterangan TEXT,
+    dicatat_oleh UUID REFERENCES public.users(id),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL,
+    UNIQUE(jadwal_pelajaran_id, siswa_id, tanggal)
+);
+
+-- 7. Absensi Karyawan
+CREATE TABLE public.absensi_karyawan (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    user_id UUID REFERENCES public.users(id) ON DELETE CASCADE,
+    tanggal DATE NOT NULL DEFAULT CURRENT_DATE,
+    waktu_masuk TIME NOT NULL DEFAULT CURRENT_TIME,
+    waktu_pulang TIME,
+    status TEXT NOT NULL DEFAULT 'hadir', -- hadir, izin, sakit, alpa
+    keterangan TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL,
+    UNIQUE(user_id, tanggal)
+);
+
+-- 8. System Settings
+CREATE TABLE public.system_settings (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    app_name TEXT NOT NULL DEFAULT 'MyEduApp',
+    app_logo_url TEXT,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::text, NOW()) NOT NULL
+);
+
+-- Insert default settings
+INSERT INTO public.system_settings (app_name) VALUES ('MyEduApp');
+
+-- 9. Storage Setup for public_storage
+-- Note: Run this in the Supabase SQL Editor if not already created via UI
+INSERT INTO storage.buckets (id, name, public) 
+VALUES ('public_storage', 'public_storage', true)
+ON CONFLICT (id) DO NOTHING;
+
+-- Storage Policies for public_storage
+CREATE POLICY "Public Access" ON storage.objects FOR SELECT USING (bucket_id = 'public_storage');
+CREATE POLICY "Authenticated Upload" ON storage.objects FOR INSERT WITH CHECK (bucket_id = 'public_storage' AND auth.role() = 'authenticated');
+CREATE POLICY "Authenticated Update" ON storage.objects FOR UPDATE WITH CHECK (bucket_id = 'public_storage' AND auth.role() = 'authenticated');
+CREATE POLICY "Authenticated Delete" ON storage.objects FOR DELETE USING (bucket_id = 'public_storage' AND auth.role() = 'authenticated');
+
+-- 10. RLS Policies (Basic setup, allow all for authenticated users for prototype)
+ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.user_roles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.jurusan ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tingkat_kelas ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tahun_ajaran ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.mata_pelajaran ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.ruang_kelas ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.siswa ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.rombongan_belajar ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.anggota_rombel ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.jadwal_pelajaran ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.absensi ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.absensi_karyawan ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.system_settings ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Enable all access for authenticated users" ON public.users FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Enable all access for authenticated users" ON public.user_roles FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Enable all access for authenticated users" ON public.jurusan FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Enable all access for authenticated users" ON public.tingkat_kelas FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Enable all access for authenticated users" ON public.tahun_ajaran FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Enable all access for authenticated users" ON public.mata_pelajaran FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Enable all access for authenticated users" ON public.ruang_kelas FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Enable all access for authenticated users" ON public.siswa FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Enable all access for authenticated users" ON public.rombongan_belajar FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Enable all access for authenticated users" ON public.anggota_rombel FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Enable all access for authenticated users" ON public.jadwal_pelajaran FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Enable all access for authenticated users" ON public.absensi FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Enable all access for authenticated users" ON public.absensi_karyawan FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Enable all access for authenticated users" ON public.system_settings FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Enable read access for all" ON public.system_settings FOR SELECT USING (true);
+
+-- 11. Functions & Triggers
+-- Function to handle new user signup
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER SET search_path = public
+AS $$
+DECLARE
+  _roles jsonb;
+  _full_name text;
+  _role text;
+BEGIN
+  -- 1. Safely parse full_name
+  _full_name := new.raw_user_meta_data->>'full_name';
+  IF _full_name IS NULL OR _full_name = '' THEN
+    _full_name := COALESCE(split_part(new.email, '@', 1), 'Pengguna Baru');
+  END IF;
+
+  -- 2. Insert into public.users
+  INSERT INTO public.users (id, email, full_name)
+  VALUES (
+    new.id,
+    COALESCE(new.email, ''),
+    _full_name
+  );
+
+  -- 3. Insert roles
+  _roles := new.raw_user_meta_data->'roles';
+  IF _roles IS NOT NULL AND jsonb_array_length(_roles) > 0 THEN
+    FOR _role IN SELECT * FROM jsonb_array_elements_text(_roles)
+    LOOP
+      BEGIN
+        INSERT INTO public.user_roles (user_id, role) VALUES (new.id, _role::public.user_role);
+      EXCEPTION WHEN OTHERS THEN
+        -- Ignore invalid roles
+      END;
+    END LOOP;
+  ELSE
+    -- Default role assignment: assign 'admin' for the first user email, otherwise 'guru'
+    IF new.email = 'iin.rci276@gmail.com' THEN
+      INSERT INTO public.user_roles (user_id, role) VALUES (new.id, 'admin'::public.user_role);
+    ELSE
+      INSERT INTO public.user_roles (user_id, role) VALUES (new.id, 'guru'::public.user_role);
+    END IF;
+  END IF;
+
+  RETURN new;
+END;
+$$;
+
+-- Trigger for new user signup
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE PROCEDURE public.handle_new_user();
+
+-- Fungsi untuk menambah user baru (Admin)
+CREATE OR REPLACE FUNCTION admin_create_user(
+    p_email TEXT,
+    p_password TEXT,
+    p_full_name TEXT,
+    p_roles TEXT[]
+) RETURNS UUID AS $$
+DECLARE
+    new_user_id UUID;
+    r TEXT;
+BEGIN
+    new_user_id := gen_random_uuid();
+    
+    INSERT INTO auth.users (id, aud, role, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, created_at, updated_at)
+    VALUES (
+        new_user_id,
+        'authenticated',
+        'authenticated',
+        p_email,
+        crypt(p_password, gen_salt('bf')),
+        now(),
+        '{"provider":"email","providers":["email"]}',
+        json_build_object('full_name', p_full_name, 'roles', to_jsonb(p_roles)),
+        now(),
+        now()
+    );
+
+    -- public.users and public.user_roles will be populated by the handle_new_user trigger
+    -- but we can also ensure they are there if the trigger fails or for immediate consistency
+    -- However, the trigger is usually enough.
+
+    RETURN new_user_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Fungsi untuk menghapus user (Admin)
+CREATE OR REPLACE FUNCTION admin_delete_user(target_user_id UUID) RETURNS VOID AS $$
+BEGIN
+    DELETE FROM public.user_roles WHERE user_id = target_user_id;
+    DELETE FROM public.users WHERE id = target_user_id;
+    DELETE FROM auth.users WHERE id = target_user_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Fungsi untuk update user (Admin)
+CREATE OR REPLACE FUNCTION admin_update_user(
+    target_user_id UUID,
+    new_email TEXT,
+    new_full_name TEXT,
+    new_roles TEXT[],
+    new_password TEXT DEFAULT NULL
+) RETURNS VOID AS $$
+DECLARE
+    r TEXT;
+BEGIN
+    -- 1. Update auth.users (email, password, metadata)
+    IF new_password IS NOT NULL AND new_password <> '' THEN
+        UPDATE auth.users SET 
+            email = new_email,
+            encrypted_password = crypt(new_password, gen_salt('bf')),
+            raw_user_meta_data = jsonb_set(
+                jsonb_set(
+                    COALESCE(raw_user_meta_data, '{}'::jsonb),
+                    '{full_name}',
+                    to_jsonb(new_full_name)
+                ),
+                '{roles}',
+                to_jsonb(new_roles)
+            ),
+            updated_at = now()
+        WHERE id = target_user_id;
+    ELSE
+        UPDATE auth.users SET 
+            email = new_email,
+            raw_user_meta_data = jsonb_set(
+                jsonb_set(
+                    COALESCE(raw_user_meta_data, '{}'::jsonb),
+                    '{full_name}',
+                    to_jsonb(new_full_name)
+                ),
+                '{roles}',
+                to_jsonb(new_roles)
+            ),
+            updated_at = now()
+        WHERE id = target_user_id;
+    END IF;
+
+    -- 2. Update public.users
+    UPDATE public.users SET 
+        email = new_email,
+        full_name = new_full_name
+    WHERE id = target_user_id;
+
+    -- 3. Update public.user_roles
+    DELETE FROM public.user_roles WHERE user_id = target_user_id;
+    
+    IF new_roles IS NOT NULL AND array_length(new_roles, 1) > 0 THEN
+        FOREACH r IN ARRAY new_roles
+        LOOP
+            BEGIN
+                INSERT INTO public.user_roles (user_id, role) 
+                VALUES (target_user_id, r::public.user_role);
+            EXCEPTION WHEN OTHERS THEN
+                -- Ignore invalid roles
+            END;
+        END LOOP;
+    ELSE
+        -- Default to 'guru' if no roles provided
+        INSERT INTO public.user_roles (user_id, role) 
+        VALUES (target_user_id, 'guru'::public.user_role);
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
